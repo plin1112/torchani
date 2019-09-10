@@ -18,8 +18,6 @@ that script to train to charges.
 import torch
 import torchani
 import os
-import math
-import tqdm
 import torchani.utils
 
 class ANICModel(torch.nn.ModuleList):
@@ -69,18 +67,19 @@ class ANICModel(torch.nn.ModuleList):
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-Rcr = 5.2000e+00
-Rca = 3.5000e+00
-EtaR = torch.tensor([1.6000000e+01], device=device)
-ShfR = torch.tensor([9.0000000e-01, 1.1687500e+00, 1.4375000e+00, 1.7062500e+00, 1.9750000e+00, 2.2437500e+00, 2.5125000e+00, 2.7812500e+00, 3.0500000e+00, 3.3187500e+00, 3.5875000e+00, 3.8562500e+00, 4.1250000e+00, 4.3937500e+00, 4.6625000e+00, 4.9312500e+00], device=device)
-Zeta = torch.tensor([3.2000000e+01], device=device)
-ShfZ = torch.tensor([1.9634954e-01, 5.8904862e-01, 9.8174770e-01, 1.3744468e+00, 1.7671459e+00, 2.1598449e+00, 2.5525440e+00, 2.9452431e+00], device=device)
-EtaA = torch.tensor([8.0000000e+00], device=device)
-ShfA = torch.tensor([9.0000000e-01, 1.5500000e+00, 2.2000000e+00, 2.8500000e+00], device=device)
-num_species = 4
-aev_computer = torchani.AEVComputer(Rcr, Rca, EtaR, ShfR, EtaA, Zeta, ShfA, ShfZ, num_species)
-energy_shifter = torchani.utils.EnergyShifter(None)
-species_to_tensor = torchani.utils.ChemicalSymbolsToInts('HCNO')
+with torch.no_grad():
+    Rcr = 5.2000e+00
+    Rca = 3.5000e+00
+    EtaR = torch.tensor([1.6000000e+01], device=device)
+    ShfR = torch.tensor([9.0000000e-01, 1.1687500e+00, 1.4375000e+00, 1.7062500e+00, 1.9750000e+00, 2.2437500e+00, 2.5125000e+00, 2.7812500e+00, 3.0500000e+00, 3.3187500e+00, 3.5875000e+00, 3.8562500e+00, 4.1250000e+00, 4.3937500e+00, 4.6625000e+00, 4.9312500e+00], device=device)
+    Zeta = torch.tensor([3.2000000e+01], device=device)
+    ShfZ = torch.tensor([1.9634954e-01, 5.8904862e-01, 9.8174770e-01, 1.3744468e+00, 1.7671459e+00, 2.1598449e+00, 2.5525440e+00, 2.9452431e+00], device=device)
+    EtaA = torch.tensor([8.0000000e+00], device=device)
+    ShfA = torch.tensor([9.0000000e-01, 1.5500000e+00, 2.2000000e+00, 2.8500000e+00], device=device)
+    num_species = 4
+    aev_computer = torchani.AEVComputer(Rcr, Rca, EtaR, ShfR, EtaA, Zeta, ShfA, ShfZ, num_species)
+    energy_shifter = torchani.utils.EnergyShifter(None)
+    species_to_tensor = torchani.utils.ChemicalSymbolsToInts('HCNO')
 
 try:
     path = os.path.dirname(os.path.realpath(__file__))
@@ -177,7 +176,7 @@ nn = ANICModel([H_network, C_network, N_network, O_network])
 # .. _TORCH.NN.MODULES.LINEAR:
 #   https://pytorch.org/docs/stable/_modules/torch/nn/modules/linear.html#Linear
 
-
+@torch.no_grad()
 def init_params(m):
     if isinstance(m, torch.nn.Linear):
         torch.nn.init.kaiming_normal_(m.weight, a=1.0)
@@ -193,7 +192,7 @@ modelc = torch.nn.Sequential(aev_computer, nn).to(device)
 ###############################################################################
 # Here we will use Adam with weight decay for the weights and Stochastic Gradient
 # Descent for biases.
-
+'''
 AdamW = torchani.optim.AdamW([
     # H networks
     {'params': [H_network[0].weight]},
@@ -239,32 +238,37 @@ SGD = torch.optim.SGD([
     {'params': [O_network[4].bias]},
     {'params': [O_network[6].bias]},
 ], lr=1e-3)
+'''
 
-AdamW_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(AdamW, factor=0.5, patience=100, threshold=0)
-SGD_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(SGD, factor=0.5, patience=100, threshold=0)
+# AdamW_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(AdamW, factor=0.5, patience=100, threshold=0)
+# SGD_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(SGD, factor=0.5, patience=100, threshold=0)
 
 ###############################################################################
 # This part of the code is also the same
-latest_checkpoint = 'charge-training-latest.pt'
+# latest_checkpoint = 'charge-training-latest.pt'
 best_model_checkpoint = 'charge-training-best.pt'
 
 ###############################################################################
 # Resume training from previously saved checkpoints:
-if os.path.isfile(latest_checkpoint):
-    checkpoint = torch.load(latest_checkpoint)
-    nn.load_state_dict(checkpoint['nn'])
-    AdamW.load_state_dict(checkpoint['AdamW'])
-    SGD.load_state_dict(checkpoint['SGD'])
-    AdamW_scheduler.load_state_dict(checkpoint['AdamW_scheduler'])
-    SGD_scheduler.load_state_dict(checkpoint['SGD_scheduler'])
+# if os.path.isfile(latest_checkpoint):
+#     checkpoint = torch.load(latest_checkpoint)
+#     nn.load_state_dict(checkpoint['nn'])
+#     AdamW.load_state_dict(checkpoint['AdamW'])
+#     SGD.load_state_dict(checkpoint['SGD'])
+#     AdamW_scheduler.load_state_dict(checkpoint['AdamW_scheduler'])
+#     SGD_scheduler.load_state_dict(checkpoint['SGD_scheduler'])
+
+if os.path.isfile(best_model_checkpoint):
+    checkpoint = torch.load(best_model_checkpoint)
+    nn.load_state_dict(checkpoint)
 
 ###############################################################################
 # During training, we need to validate on validation set and if validation error
 # is better than the best, then save the new best model to a checkpoint
 
 # helper function to convert energy unit from Hartree to kcal/mol
-def hartree2kcal(x):
-    return 627.509 * x
+# def hartree2kcal(x):
+#     return 627.509 * x
 
 ################################################################################
 # Use trained network to calculate the charges for each molecule/conformation
