@@ -106,7 +106,7 @@ ani_1x_model = 'ani-1x_t0_model0.pt'
 if not os.path.exists(ani_1x_model):
     torch.save(model.state_dict(), ani_1x_model)
 
-max_epochs = 160
+max_epochs = 300
 early_stopping_learning_rate = 1.0E-5
 charge_coefficient = 1.0  # controls the importance of energy loss vs charge loss
 
@@ -185,7 +185,7 @@ O_network = torch.nn.Sequential(
     torch.nn.Linear(96, 1)
 )
 
-nn = ANICModel([H_network, C_network, N_network, O_network])
+nn = ANICModel([H_network, C_network, N_network, O_network]).to(device)
 # print(nn)
 
 ###############################################################################
@@ -213,12 +213,13 @@ if os.path.isfile(ani_1x_model):
             if i_layer < 1:
                 # print('nn.module:', i_module, ' i_module.layer', i_layer, ' are fixed.')
                 for param in nn[i_module][i_layer].parameters():
-                    print(param.size())
+                    # print(param.size())
                     param.requires_grad = False
             else:
                 # print('nn.module:', i_module, ' i_module.layer', i_layer, ' are free.')
                 for param in nn[i_module][i_layer].parameters():
-                    print(param.size())
+                    pass
+                    # print(param.size())
 else:
     nn.apply(init_params)
 
@@ -310,9 +311,9 @@ def validate():
 
     for valid_batch, _, valid_labels in validation_generator:
         # species_aevs, output obtained from validation_generator
-        predicted_charges = torch.Tensor()
-        true_charges = torch.Tensor()
-        num_atoms = torch.tensor(0.0)
+        predicted_charges = torch.Tensor().to(device)
+        true_charges = torch.Tensor().to(device)
+        num_atoms = torch.tensor(0.0).to(device)
         for chunk, chunk_labels in zip(valid_batch, valid_labels):
             chunk_species, chunk_aevs = chunk
             chunk_true_charges = chunk_labels
@@ -366,10 +367,10 @@ for _ in range(AdamW_scheduler.last_epoch + 1, max_epochs):
         desc="epoch {}".format(AdamW_scheduler.last_epoch)
     ):
 
-        num_atoms = torch.tensor(0.0)
+        num_atoms = torch.tensor(0.0).to(device)
         charge_loss = []
-        predicted_charges = torch.Tensor()
-        true_charges = torch.Tensor()
+        predicted_charges = torch.Tensor().to(device)
+        true_charges = torch.Tensor().to(device)
         i += 1
         for chunk, chunk_true_charges in zip(train_batch, train_labels):
             chunk_species, chunk_aevs = chunk

@@ -105,7 +105,7 @@ model = torchani.neurochem.load_model(consts.species, model_dir)
 ani_1x_model = 'ani-1x_t0_model0.pt'
 # torch.save(model.state_dict(), ani_1x_model)
 
-max_epochs = 160
+max_epochs = 161
 early_stopping_learning_rate = 1.0E-5
 charge_coefficient = 1.0  # controls the importance of energy loss vs charge loss
 
@@ -314,9 +314,9 @@ def validate():
     return hartree2kcal(math.sqrt(total_mse / count)) 
     '''
     for _, batch_x in validation:
-        predicted_charges = torch.Tensor()
-        true_charges = torch.Tensor()
-        num_atoms = 0.0
+        predicted_charges = torch.Tensor().to(device)
+        true_charges = torch.Tensor().to(device)
+        num_atoms = torch.tensor(0.0).to(device)
         for chunk in batch_x['atomic']:
             chunk_species = chunk['species']
             chunk_coordinates = chunk['coordinates']
