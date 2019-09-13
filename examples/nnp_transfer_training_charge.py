@@ -2,7 +2,7 @@
 """
 .. _charge-training-example:
 
-Train Neural Network Charges To Charges only
+Train Neural Network Charges To Charges only using transfer learning
 ==========================================================
 
 We have seen how to train a neural network potential by manually writing
@@ -18,6 +18,9 @@ that script to train to charges.
 import torch
 import torchani
 import os
+import math
+import torch.utils.tensorboard
+import tqdm
 import torchani.utils
 
 class ANICModel(torch.nn.ModuleList):
@@ -67,36 +70,44 @@ class ANICModel(torch.nn.ModuleList):
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-with torch.no_grad():
-    Rcr = 5.2000e+00
-    Rca = 3.5000e+00
-    EtaR = torch.tensor([1.6000000e+01], device=device)
-    ShfR = torch.tensor([9.0000000e-01, 1.1687500e+00, 1.4375000e+00, 1.7062500e+00, 1.9750000e+00, 2.2437500e+00, 2.5125000e+00, 2.7812500e+00, 3.0500000e+00, 3.3187500e+00, 3.5875000e+00, 3.8562500e+00, 4.1250000e+00, 4.3937500e+00, 4.6625000e+00, 4.9312500e+00], device=device)
-    Zeta = torch.tensor([3.2000000e+01], device=device)
-    ShfZ = torch.tensor([1.9634954e-01, 5.8904862e-01, 9.8174770e-01, 1.3744468e+00, 1.7671459e+00, 2.1598449e+00, 2.5525440e+00, 2.9452431e+00], device=device)
-    EtaA = torch.tensor([8.0000000e+00], device=device)
-    ShfA = torch.tensor([9.0000000e-01, 1.5500000e+00, 2.2000000e+00, 2.8500000e+00], device=device)
-    num_species = 4
-    aev_computer = torchani.AEVComputer(Rcr, Rca, EtaR, ShfR, EtaA, Zeta, ShfA, ShfZ, num_species)
-    energy_shifter = torchani.utils.EnergyShifter(None)
-    species_to_tensor = torchani.utils.ChemicalSymbolsToInts('HCNO')
+Rcr = 5.2000e+00
+Rca = 3.5000e+00
+EtaR = torch.tensor([1.6000000e+01], device=device)
+ShfR = torch.tensor([9.0000000e-01, 1.1687500e+00, 1.4375000e+00, 1.7062500e+00, 1.9750000e+00, 2.2437500e+00, 2.5125000e+00, 2.7812500e+00, 3.0500000e+00, 3.3187500e+00, 3.5875000e+00, 3.8562500e+00, 4.1250000e+00, 4.3937500e+00, 4.6625000e+00, 4.9312500e+00], device=device)
+Zeta = torch.tensor([3.2000000e+01], device=device)
+ShfZ = torch.tensor([1.9634954e-01, 5.8904862e-01, 9.8174770e-01, 1.3744468e+00, 1.7671459e+00, 2.1598449e+00, 2.5525440e+00, 2.9452431e+00], device=device)
+EtaA = torch.tensor([8.0000000e+00], device=device)
+ShfA = torch.tensor([9.0000000e-01, 1.5500000e+00, 2.2000000e+00, 2.8500000e+00], device=device)
+num_species = 4
+aev_computer = torchani.AEVComputer(Rcr, Rca, EtaR, ShfR, EtaA, Zeta, ShfA, ShfZ, num_species)
+energy_shifter = torchani.utils.EnergyShifter(None)
+species_to_tensor = torchani.utils.ChemicalSymbolsToInts('HCNO')
 
 try:
     path = os.path.dirname(os.path.realpath(__file__))
 except NameError:
     path = os.getcwd()
-dspath = os.path.join(path, '../dataset/COMP6/COMP6v1/DrugBank/gdb13_13_test1000_mod.h5')
+dspath = os.path.join(path, '../dataset/COMP6/COMP6v1/DrugBank/drugbank_testset_mod.h5')
 
 # batch_size = 2560
 batch_size = 256
 
 # checkpoint file for best model and latest model
-best_model_checkpoint = 'charge-transfer-training-best0.pt'
-# latest_checkpoint = 'charge-transfer-training-latest.pt'
+best_model_checkpoint = 'charge-transfer-training-best0-3.pt'
+latest_checkpoint = 'charge-transfer-training-latest0-3.pt'
 
+# save existing model parameters into checkpoint file format
+const_file = os.path.join(path, '../torchani/resources/ani-1x_8x/rHCNO-5.2R_16-3.5A_a4-8.params')  # noqa: E501
+consts = torchani.neurochem.Constants(const_file)
+model_dir = os.path.join(path, '../torchani/resources/ani-1x_8x/train0/networks')  # noqa: E501
+model = torchani.neurochem.load_model(consts.species, model_dir)
+
+ani_1x_model = 'ani-1x_t0_model0.pt'
+# torch.save(model.state_dict(), ani_1x_model)
+
+max_epochs = 160
+early_stopping_learning_rate = 1.0E-5
 charge_coefficient = 1.0  # controls the importance of energy loss vs charge loss
-
-out_file_name = 'comparison_cm5_gdb13_13_test1000_mod.txt'
 
 ###############################################################################
 # The code to create the dataset is a bit different: we need to manually
@@ -106,7 +117,7 @@ out_file_name = 'comparison_cm5_gdb13_13_test1000_mod.txt'
 training, validation = torchani.data.load_ani_dataset(
     dspath, species_to_tensor, batch_size, rm_outlier=True,
     device=device, atomic_properties=['cm5'],
-    transform=[energy_shifter.subtract_from_dataset], split=[0.0, None])
+    transform=[energy_shifter.subtract_from_dataset], split=[0.8, None])
 
 print('Self atomic energies: ', energy_shifter.self_energies)
 
@@ -116,7 +127,7 @@ print('Self atomic energies: ', energy_shifter.self_energies)
 # contain a key ``'atomic'`` where ``properties['atomic']`` is a list of dict
 # containing forces:
 
-data = validation[0]
+data = training[0]
 properties = data[1]
 atomic_properties = properties['atomic']
 print(type(atomic_properties))
@@ -184,14 +195,27 @@ nn = ANICModel([H_network, C_network, N_network, O_network])
 # .. _TORCH.NN.MODULES.LINEAR:
 #   https://pytorch.org/docs/stable/_modules/torch/nn/modules/linear.html#Linear
 
-@torch.no_grad()
 def init_params(m):
     if isinstance(m, torch.nn.Linear):
         torch.nn.init.kaiming_normal_(m.weight, a=1.0)
         torch.nn.init.zeros_(m.bias)
 
-
-nn.apply(init_params)
+if os.path.isfile(ani_1x_model):
+    checkpoint = torch.load(ani_1x_model)
+    nn.load_state_dict(checkpoint)
+    for i_module in range(4):
+        for i_layer in range(0, 7, 2):
+            if i_layer < 1:
+                print('nn.module:', i_module, ' i_module.layer', i_layer, ' are fixed.')
+                for param in nn[i_module][i_layer].parameters():
+                    print(param.size())
+                    param.requires_grad = False
+            else:
+                print('nn.module:', i_module, ' i_module.layer', i_layer, ' are free.')
+                for param in nn[i_module][i_layer].parameters():
+                    print(param.size())
+else:
+    nn.apply(init_params)
 
 ###############################################################################
 # Let's now create a pipeline of AEV Computer --> Neural Networks.
@@ -200,7 +224,7 @@ modelc = torch.nn.Sequential(aev_computer, nn).to(device)
 ###############################################################################
 # Here we will use Adam with weight decay for the weights and Stochastic Gradient
 # Descent for biases.
-'''
+
 AdamW = torchani.optim.AdamW([
     # H networks
     {'params': [H_network[0].weight]},
@@ -246,54 +270,153 @@ SGD = torch.optim.SGD([
     {'params': [O_network[4].bias]},
     {'params': [O_network[6].bias]},
 ], lr=1e-3)
-'''
 
-# AdamW_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(AdamW, factor=0.5, patience=100, threshold=0)
-# SGD_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(SGD, factor=0.5, patience=100, threshold=0)
+AdamW_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(AdamW, factor=0.5, patience=100, threshold=0)
+SGD_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(SGD, factor=0.5, patience=100, threshold=0)
+
 
 ###############################################################################
 # This part of the code is also the same
 
 ###############################################################################
 # Resume training from previously saved checkpoints:
-# if os.path.isfile(latest_checkpoint):
-#     checkpoint = torch.load(latest_checkpoint)
-#     nn.load_state_dict(checkpoint['nn'])
-#     AdamW.load_state_dict(checkpoint['AdamW'])
-#     SGD.load_state_dict(checkpoint['SGD'])
-#     AdamW_scheduler.load_state_dict(checkpoint['AdamW_scheduler'])
-#     SGD_scheduler.load_state_dict(checkpoint['SGD_scheduler'])
-
-if os.path.isfile(best_model_checkpoint):
-    checkpoint = torch.load(best_model_checkpoint)
-    nn.load_state_dict(checkpoint)
+if os.path.isfile(latest_checkpoint):
+    checkpoint = torch.load(latest_checkpoint)
+    nn.load_state_dict(checkpoint['nn'])
+    AdamW.load_state_dict(checkpoint['AdamW'])
+    SGD.load_state_dict(checkpoint['SGD'])
+    AdamW_scheduler.load_state_dict(checkpoint['AdamW_scheduler'])
+    SGD_scheduler.load_state_dict(checkpoint['SGD_scheduler'])
 
 ###############################################################################
 # During training, we need to validate on validation set and if validation error
 # is better than the best, then save the new best model to a checkpoint
 
 # helper function to convert energy unit from Hartree to kcal/mol
-# def hartree2kcal(x):
-#     return 627.509 * x
+def hartree2kcal(x):
+    return 627.509 * x
 
-################################################################################
-# Use trained network to calculate the charges for each molecule/conformation
-f_out = open(out_file_name, 'w+')
+def validate():
+    # run validation
+    mse_sum = torch.nn.MSELoss(reduction='none')
+    total_mse = 0.0
+    count = 0
+    '''
+    for batch_x, batch_y in validation:
+        true_energies = batch_y['energies']
+        predicted_energies = []
+        for chunk_species, chunk_coordinates in batch_x:
+            _, chunk_energies = model((chunk_species, chunk_coordinates))
+            predicted_energies.append(chunk_energies)
+        predicted_energies = torch.cat(predicted_energies)
+        total_mse += mse_sum(predicted_energies, true_energies).item()
+        count += predicted_energies.shape[0]
+    return hartree2kcal(math.sqrt(total_mse / count)) 
+    '''
+    for _, batch_x in validation:
+        predicted_charges = torch.Tensor()
+        true_charges = torch.Tensor()
+        num_atoms = 0.0
+        for chunk in batch_x['atomic']:
+            chunk_species = chunk['species']
+            chunk_coordinates = chunk['coordinates']
+            chunk_true_charges = chunk['cm5']
+            true_charges = torch.cat((true_charges, torch.flatten(chunk_true_charges)))
+            _, chunk_charges = modelc((chunk_species, chunk_coordinates))
+            predicted_charges = torch.cat((predicted_charges, torch.flatten(chunk_charges)))
+            chunk_num_atoms = (chunk_species >= 0).to(chunk_true_charges.dtype).sum()
+            num_atoms += chunk_num_atoms
+        # predicted_charges = torch.flatten(torch.tensor(predicted_charges))
+        # true_charges = torch.flatten(torch.tensor(true_charges))
+        count += predicted_charges.shape[0]
+        total_mse += mse_sum(true_charges, predicted_charges).sum() / num_atoms
 
-for _, batch_x in validation:
-    for chunk in batch_x['atomic']:
-        chunk_species = chunk['species']
-        chunk_coordinates = chunk['coordinates']
-        chunk_true_charges = chunk['cm5']
-        true_charges = torch.flatten(chunk_true_charges)
-        _, chunk_charges = modelc((chunk_species, chunk_coordinates))
-        predicted_charges = torch.flatten(chunk_charges)
-        # print(chunk['path'])
-        species_list = [a.item() for a in chunk_species.flatten()]
-        true_charges_list = [b.item() for b in chunk_true_charges.flatten()]
-        chunk_charges_list = [c.item() for c in chunk_charges.flatten()]
-        for a, b, c, in zip(species_list, true_charges_list, chunk_charges_list):
-            if a >= 0:
-                f_out.write('%-5s %10.5f %10.5f\n' % (a, b, c))
+    return math.sqrt(total_mse)
 
-f_out.close()
+###############################################################################
+# We will also use TensorBoard to visualize our training process
+tensorboard = torch.utils.tensorboard.SummaryWriter()
+
+###############################################################################
+# In the training loop, we need to compute force, and loss for forces
+mse = torch.nn.MSELoss(reduction='none')
+
+print("training starting from epoch", AdamW_scheduler.last_epoch + 1)
+
+for _ in range(AdamW_scheduler.last_epoch + 1, max_epochs):
+    rmse = validate()
+    print('RMSE:', rmse, 'at epoch', AdamW_scheduler.last_epoch + 1)
+
+    learning_rate = AdamW.param_groups[0]['lr']
+
+    if learning_rate < early_stopping_learning_rate:
+        break
+
+    # checkpoint
+    if AdamW_scheduler.is_better(rmse, AdamW_scheduler.best):
+        torch.save(nn.state_dict(), best_model_checkpoint)
+
+    AdamW_scheduler.step(rmse)
+    SGD_scheduler.step(rmse)
+
+    tensorboard.add_scalar('validation_rmse', rmse, AdamW_scheduler.last_epoch)
+    tensorboard.add_scalar('best_validation_rmse', AdamW_scheduler.best, AdamW_scheduler.last_epoch)
+    tensorboard.add_scalar('learning_rate', learning_rate, AdamW_scheduler.last_epoch)
+
+    # Besides being stored in x, species and coordinates are also stored in y.
+    # So here, for simplicity, we just ignore the x and use y for everything.
+    for i, (_, batch_y) in tqdm.tqdm(
+        enumerate(training),
+        total=len(training),
+        desc="epoch {}".format(AdamW_scheduler.last_epoch)
+    ):
+
+        true_energies = batch_y['energies']
+        predicted_energies = []
+        num_atoms = []
+        charge_loss = []
+
+        for chunk in batch_y['atomic']:
+            chunk_species = chunk['species']
+            chunk_coordinates = chunk['coordinates']
+            chunk_true_charges = chunk['cm5']
+            chunk_num_atoms = (chunk_species >= 0).to(true_energies.dtype).sum(dim=1)
+            num_atoms.append(chunk_num_atoms)
+
+            # We do not need grad for `chunk_coordinates`
+            chunk_coordinates.requires_grad_(False)
+            _, chunk_charges = modelc((chunk_species, chunk_coordinates))
+            # _, chunk_energies = model((chunk_species, chunk_coordinates))
+            # Now let's compute loss for force of this chunk
+            chunk_charge_loss = mse(chunk_true_charges, chunk_charges).sum(dim=1) / chunk_num_atoms
+            # predicted_energies.append(chunk_energies)
+            charge_loss.append(chunk_charge_loss)
+
+        num_atoms = torch.cat(num_atoms)
+        # predicted_energies = torch.cat(predicted_energies)
+
+        # Now the total loss has two parts, energy loss and charge loss
+        # energy_loss = (mse(predicted_energies, true_energies) / num_atoms.sqrt()).mean()
+        charge_loss = torch.cat(charge_loss).mean()
+        # loss = energy_loss + charge_coefficient * charge_loss
+        loss = charge_coefficient * charge_loss
+
+        AdamW.zero_grad()
+        SGD.zero_grad()
+        loss.backward()
+        AdamW.step()
+        SGD.step()
+
+        # write current batch loss to TensorBoard
+        tensorboard.add_scalar('batch_loss', loss, AdamW_scheduler.last_epoch * len(training) + i)
+
+    torch.save({
+        'nn': nn.state_dict(),
+        'AdamW': AdamW.state_dict(),
+        'SGD': SGD.state_dict(),
+        'AdamW_scheduler': AdamW_scheduler.state_dict(),
+        'SGD_scheduler': SGD_scheduler.state_dict(),
+    }, latest_checkpoint)
+
+final_rmse = validate()
+print('Final RMSE:', final_rmse, 'after epoch', AdamW_scheduler.last_epoch)
