@@ -76,12 +76,12 @@ def dipole_moment(coords_charges):
     coords is a 3-dimension tensor (mol, atom, xyz)
     charges is a 2-dimension tensor (mol, atom)
     """
-    toDebye = 4.80320425
+    # toDebye = 4.80320425 : use if in the unit of Debye
     coords, charges = coords_charges
     charges = charges.unsqueeze(-1)
     dipoles = coords * charges
     dipoles = torch.sum(dipoles, dim=1)
-    return dipoles * toDebye
+    return dipoles
 
 class ANIDModel(torch.nn.ModuleList):
     """ANID model that compute dipole properties from species, coordinates and AEVs.
@@ -135,7 +135,7 @@ class ANIDModel(torch.nn.ModuleList):
         set_zero = torch.full_like(species_, self.padding_fill, dtype=total_charges.dtype)
         output.masked_scatter_(mask2, set_zero)
         # total_charges = torch.sum(output, dim=1) # return the residual total_charges before correction
-        return species, dipole_moment((coordinates, output)), total_charges
+        return species, dipole_moment((coordinates, output)), excess_charge.squeeze(-1)
 
 class DipoleModule(torch.nn.Module):
     r"""The Dipole Module that takes coordinates and charges as input and outputs dipoles of molecules.
@@ -247,8 +247,8 @@ except NameError:
 batch_size = 256
 
 # checkpoint file for best model and latest model
-best_model_checkpoint = 'dipole-transfer-training-best0-4.pt'
-latest_checkpoint = 'dipole-transfer-training-latest0-4.pt'
+best_model_checkpoint = 'dipole-transfer-training-best0-3.pt'
+latest_checkpoint = 'dipole-transfer-training-latest0-3.pt'
 
 # save existing model parameters into checkpoint file format
 const_file = os.path.join(path, '../torchani/resources/ani-1x_8x/rHCNO-5.2R_16-3.5A_a4-8.params')  # noqa: E501

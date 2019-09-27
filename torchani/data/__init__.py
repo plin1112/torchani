@@ -453,7 +453,16 @@ class AEVPCacheLoader(Dataset):
         if self.selection:
             chunk_labels = []
             for chunk in chunk_dataset:
-                chunk_labels.append(chunk[self.selection])
+                if isinstance(self.selection, list):
+                    labels = {}
+                    for selection in self.selection:
+                        if selection in chunk:
+                            labels[selection] = chunk[selection]
+                    if labels:
+                        chunk_labels.append(labels)
+                else:
+                    if self.selection in chunk:
+                        chunk_labels.append(chunk[self.selection])
             return species_aevs, output, chunk_labels
         else:
             return species_aevs, output
