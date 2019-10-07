@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """
-################ Work in Progress ################
 .. _training-example:
 
 Train Your Own Neural Network Potential
@@ -23,117 +22,175 @@ specified in `inputtrain.ipt`_
 
 import torch
 import torchani
-from torchani import utils
 import os
 import math
 import torch.utils.tensorboard
 import tqdm
 
-# device to run the training
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def compute_lrc(species, coordinates, cell, shifts, triu_index, constants, sizes):
+    Rcr, EtaR, ShfR, Rca, ShfZ, EtaA, Zeta, ShfA = constants
+    num_species, radial_sublength, radial_length, angular_sublength, angular_length, aev_length = sizes
+    num_molecules = species.shape[0]
+    num_atoms = species.shape[1]
+    num_species_pairs = angular_length // angular_sublength
 
-class ANIVModel(torch.nn.ModuleList):
-    """ANIV model that compute properties from species and AEVs and also carries coordinates.
-    Use to prepare for addition of vdw corrections
+    atom_index1, atom_index2, shifts = neighbor_pairs(species == -1, coordinates, cell, shifts, Rcr)
+    species = species.flatten()
+    coordinates = coordinates.flatten(0, 1)
+    species1 = species[atom_index1]
+    species2 = species[atom_index2]
+    shift_values = torch.mm(shifts.to(cell.dtype), cell)
 
-    Different atom types might have different modules, when computing
-    properties, for each atom, the module for its corresponding atom type will
-    be applied to its AEV, after that, outputs of modules will be reduced along
-    different atoms to obtain molecular properties.
+    vec = coordinates.index_select(0, atom_index1) - coordinates.index_select(0, atom_index2) + shift_values
+    distances = vec.norm(2, -1)
 
-    Arguments:
-        modules (:class:`collections.abc.Sequence`): Modules for each atom
-            types. Atom types are distinguished by their order in
-            :attr:`modules`, which means, for example ``modules[i]`` must be
-            the module for atom type ``i``. Different atom types can share a
-            module by putting the same reference in :attr:`modules`.
-        reducer (:class:`collections.abc.Callable`): The callable that reduce
-            atomic outputs into molecular outputs. It must have signature
-            ``(tensor, dim)->tensor``.
-        padding_fill (float): The value to fill output of padding atoms.
-            Padding values will participate in reducing, so this value should
-            be appropriately chosen so that it has no effect on the result. For
-            example, if the reducer is :func:`torch.sum`, then
-            :attr:`padding_fill` should be 0, and if the reducer is
-            :func:`torch.min`, then :attr:`padding_fill` should be
-            :obj:`math.inf`.
-    """
+    # compute radial aev
+    radial_terms_ = radial_terms(Rcr, EtaR, ShfR, distances)
+    radial_aev = radial_terms_.new_zeros(num_molecules * num_atoms * num_species, radial_sublength)
+    index1 = atom_index1 * num_species + species2
+    index2 = atom_index2 * num_species + species1
+    radial_aev.index_add_(0, index1, radial_terms_)
+    radial_aev.index_add_(0, index2, radial_terms_)
+    radial_aev = radial_aev.reshape(num_molecules, num_atoms, radial_length)
 
-    def __init__(self, modules, reducer=torch.sum, padding_fill=0):
-        super(ANIVModel, self).__init__(modules)
-        self.reducer = reducer
-        self.padding_fill = padding_fill
+    # Rca is usually much smaller than Rcr, using neighbor list with cutoff=Rcr is a waste of resources
+    # Now we will get a smaller neighbor list that only cares about atoms with distances <= Rca
+    even_closer_indices = (distances <= Rca).nonzero().flatten()
+    atom_index1 = atom_index1.index_select(0, even_closer_indices)
+    atom_index2 = atom_index2.index_select(0, even_closer_indices)
+    species1 = species1.index_select(0, even_closer_indices)
+    species2 = species2.index_select(0, even_closer_indices)
+    vec = vec.index_select(0, even_closer_indices)
 
-    def forward(self, species_aev_coordinates):
-        species, aev, coordinates = species_aev_coordinates
-        # species, aev = species_aev
-        species_ = species.flatten()
-        present_species = utils.present_species(species)
-        aev = aev.flatten(0, 1)
+    # compute angular aev
+    central_atom_index, pair_index1, pair_index2, sign1, sign2 = triple_by_molecule(atom_index1, atom_index2)
+    vec1 = vec.index_select(0, pair_index1) * sign1.unsqueeze(1).to(vec.dtype)
+    vec2 = vec.index_select(0, pair_index2) * sign2.unsqueeze(1).to(vec.dtype)
+    species1_ = torch.where(sign1 == 1, species2[pair_index1], species1[pair_index1])
+    species2_ = torch.where(sign2 == 1, species2[pair_index2], species1[pair_index2])
+    angular_terms_ = angular_terms(Rca, ShfZ, EtaA, Zeta, ShfA, vec1, vec2)
+    angular_aev = angular_terms_.new_zeros(num_molecules * num_atoms * num_species_pairs, angular_sublength)
+    index = central_atom_index * num_species_pairs + triu_index[species1_, species2_]
+    angular_aev.index_add_(0, index, angular_terms_)
+    angular_aev = angular_aev.reshape(num_molecules, num_atoms, angular_length)
+    return torch.cat([radial_aev, angular_aev], dim=-1)
 
-        output = torch.full_like(species_, self.padding_fill,
-                                 dtype=aev.dtype)
-        for i in present_species:
-            mask = (species_ == i)
-            input_ = aev.index_select(0, mask.nonzero().squeeze())
-            output.masked_scatter_(mask, self[i](input_).squeeze())
-        output = output.view_as(species)
-        aa_energies = output[:, :, 0].unsqueeze(-1)
-        c6s = output[:, :, 1].unsqueeze(-1)
-        return species, self.reducer(aa_energies, dim=1), c6s, coordinates
-
-
-class VDWModule(torch.nn.Module):
-    r"""The VDW Module that takes species and coordinates as input and outputs long-range VDW corrections.
+class LRCComputer(torch.nn.Module):
+    r"""The LRC computer that takes coordinates as input and outputs long range correction to energies.
 
     Arguments:
-        species: list of species, (mol, atom)
-        coordinates is a 3-dimension tensor (mol, atom, xyz)
+        Rcr (float): :math:`R_C` in equation (2) when used at equation (3)
+            in the `ANI paper`_.
+        Rca (float): :math:`R_C` in equation (2) when used at equation (4)
+            in the `ANI paper`_.
+        EtaR (:class:`torch.Tensor`): The 1D tensor of :math:`\eta` in
+            equation (3) in the `ANI paper`_.
+        ShfR (:class:`torch.Tensor`): The 1D tensor of :math:`R_s` in
+            equation (3) in the `ANI paper`_.
+        EtaA (:class:`torch.Tensor`): The 1D tensor of :math:`\eta` in
+            equation (4) in the `ANI paper`_.
+        Zeta (:class:`torch.Tensor`): The 1D tensor of :math:`\zeta` in
+            equation (4) in the `ANI paper`_.
+        ShfA (:class:`torch.Tensor`): The 1D tensor of :math:`R_s` in
+            equation (4) in the `ANI paper`_.
+        ShfZ (:class:`torch.Tensor`): The 1D tensor of :math:`\theta_s` in
+            equation (4) in the `ANI paper`_.
+        num_species (int): Number of supported atom types.
+
+    .. _ANI paper:
+        http://pubs.rsc.org/en/Content/ArticleLanding/2017/SC/C6SC05720A#!divAbstract
     """
+    __constants__ = ['Rcr', 'Rca', 'num_species', 'radial_sublength',
+                     'radial_length', 'angular_sublength', 'angular_length',
+                     'aev_length']
 
-    def __init__(self):
-        super(VDWModule, self).__init__()
+    def __init__(self, Rcr, Rca, EtaR, ShfR, EtaA, Zeta, ShfA, ShfZ, num_species):
+        super(LRCComputer, self).__init__()
+        self.Rcr = Rcr
+        self.Rca = Rca
+        assert Rca <= Rcr, "Current implementation of AEVComputer assumes Rca <= Rcr"
+        # convert constant tensors to a ready-to-broadcast shape
+        # shape convension (..., EtaR, ShfR)
+        self.register_buffer('EtaR', EtaR.view(-1, 1))
+        self.register_buffer('ShfR', ShfR.view(1, -1))
+        # shape convension (..., EtaA, Zeta, ShfA, ShfZ)
+        self.register_buffer('EtaA', EtaA.view(-1, 1, 1, 1))
+        self.register_buffer('Zeta', Zeta.view(1, -1, 1, 1))
+        self.register_buffer('ShfA', ShfA.view(1, 1, -1, 1))
+        self.register_buffer('ShfZ', ShfZ.view(1, 1, 1, -1))
 
-    def vdw_func(self, species_, coords_, c6_):
-        ################ Work in Progress ################
-        # (mol, 1, atom, xyz) - (mol, atom, 1, xyz) => (mol, atom1, atom2, diff_xyz)
-        dist = coords_.unsqueeze(1) - coords_.unsqueeze(2)
-        # dist = torch.sqrt(torch.sum(dist ** 2, dim=-1) + 1e-6).unsqueeze(-1)
-        # distances = dist.norm(2, -1)
-        dist2 = torch.sum(dist ** 2, dim=-1).unsqueeze(-1)
-        dist6 = dist2 ** 3
-        # c6_ is regularized by sigmoid function to be in range of 0 to 1000.0 (suitable for HCNO and probably
-        # some other atoms/ions
-        # (mol, 1, c6_atom) - (mol, c6_atom, 1) = > (mol, c6_atom1, c6_atom2)
-        c6_ = 1000.0 / (1.0 + math.exp(c6_))
-        c6_ij = 2.0 * c6_.unsqueeze(1) * c6_.unsqueeze(2) / (c6_.unsqueeze(1) + c6_.unsqueeze(2))
-        vdw_c6 = c6_ij / dist6
-        size = vdw_c6.shape[1]
-        vdw_c6[:, range(size), range(size)] = 0.0
-        assert not (torch.isnan(vdw_c6)).any()
-        assert not (vdw_c6 == float('inf')).all()
-        # Fermi-type damping function using prefactor 20.0, rcut = 5.2
-        # f_damp = 1.0 / (1.0 + math.exp(-20.0 * (math.sqrt(dist2) / 5.2 - 1.0)))
-        # Modified Fermi-type damping function, rcut^2 = 25.0
-        f_damp = 1.0 / (1.0 + math.exp(dist2 - 25.0))
+        self.num_species = num_species
+        # The length of radial subaev of a single species
+        self.radial_sublength = self.EtaR.numel() * self.ShfR.numel()
+        # The length of full radial aev
+        self.radial_length = self.num_species * self.radial_sublength
+        # The length of angular subaev of a single species
+        self.angular_sublength = self.EtaA.numel() * self.Zeta.numel() * self.ShfA.numel() * self.ShfZ.numel()
+        # The length of full angular aev
+        self.angular_length = (self.num_species * (self.num_species + 1)) // 2 * self.angular_sublength
+        # The length of full aev
+        self.aev_length = self.radial_length + self.angular_length
+        self.sizes = self.num_species, self.radial_sublength, self.radial_length, self.angular_sublength, self.angular_length, self.aev_length
 
-        vdw_energies = torch.sum(f_damp * vdw_c6, dim=-1)
-        return vdw_energies
+        self.register_buffer('triu_index', triu_index(num_species))
 
+        # Set up default cell and compute default shifts.
+        # These values are used when cell and pbc switch are not given.
+        cutoff = max(self.Rcr, self.Rca)
+        default_cell = torch.eye(3, dtype=self.EtaR.dtype, device=self.EtaR.device)
+        default_pbc = torch.zeros(3, dtype=torch.bool, device=self.EtaR.device)
+        default_shifts = compute_shifts(default_cell, default_pbc, cutoff)
+        self.register_buffer('default_cell', default_cell)
+        self.register_buffer('default_shifts', default_shifts)
+
+    def constants(self):
+        return self.Rcr, self.EtaR, self.ShfR, self.Rca, self.ShfZ, self.EtaA, self.Zeta, self.ShfA
+
+    # @torch.jit.script_method
     def forward(self, input_):
-        """Compute van der waals interactions within each molecule
+        """Compute LRCs
 
         Arguments:
-            input_ (tuple): species, coordinates
-            coordinates : (mol, atom, xyz)
-        Returns:
-            vdw_energies (tensor): (mol)
-        """
-        species, energies, c6, coords = input_
+            input_ (tuple): Can be one of the following two cases:
 
-        vdw_energies = self.vdw_func(species, coords, c6)
-        total_energies = energies + vdw_energies
-        return total_energies
+                If you don't care about periodic boundary conditions at all,
+                then input can be a tuple of two tensors: species and coordinates.
+                species must have shape ``(C, A)`` and coordinates must have
+                shape ``(C, A, 3)``, where ``C`` is the number of molecules
+                in a chunk, and ``A`` is the number of atoms.
+
+                If you want to apply periodic boundary conditions, then the input
+                would be a tuple of four tensors: species, coordinates, cell, pbc
+                where species and coordinates are the same as described above, cell
+                is a tensor of shape (3, 3) of the three vectors defining unit cell:
+
+                .. code-block:: python
+
+                    tensor([[x1, y1, z1],
+                            [x2, y2, z2],
+                            [x3, y3, z3]])
+
+                and pbc is boolean vector of size 3 storing if pbc is enabled
+                for that direction.
+
+        Returns:
+            tuple: Species and AEVs. species are the species from the input
+            unchanged, and AEVs is a tensor of shape
+            ``(C, A, self.aev_length())``
+        """
+        if len(input_) == 2:
+            species, coordinates = input_
+            cell = self.default_cell
+            shifts = self.default_shifts
+        else:
+            assert len(input_) == 4
+            species, coordinates, cell, pbc = input_
+            cutoff = max(self.Rcr, self.Rca)
+            shifts = compute_shifts(cell, pbc, cutoff)
+        return species, compute_lrc(species, coordinates, cell, shifts, self.triu_index, self.constants(), self.sizes)
+
+# device to run the training
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 ###############################################################################
 # Now let's setup constants and construct an AEV computer. These numbers could
@@ -153,13 +210,6 @@ class VDWModule(torch.nn.Module):
 # .. _sae_linfit.dat:
 #   https://github.com/aiqm/torchani/blob/master/torchani/resources/ani-1x_8x/sae_linfit.dat
 
-try:
-    path = os.path.dirname(os.path.realpath(__file__))
-except NameError:
-    path = os.getcwd()
-
-dspath = os.path.join(path, '../dataset/ani1-1x/ani_al-9.0.1.h5')
-
 Rcr = 5.2000e+00
 Rca = 3.5000e+00
 EtaR = torch.tensor([1.6000000e+01], device=device)
@@ -169,10 +219,8 @@ ShfZ = torch.tensor([1.9634954e-01, 5.8904862e-01, 9.8174770e-01, 1.3744468e+00,
 EtaA = torch.tensor([8.0000000e+00], device=device)
 ShfA = torch.tensor([9.0000000e-01, 1.5500000e+00, 2.2000000e+00, 2.8500000e+00], device=device)
 num_species = 4
-aevp_computer = torchani.AEVPComputer(Rcr, Rca, EtaR, ShfR, EtaA, Zeta, ShfA, ShfZ, num_species)
-sae_file = os.path.join(path, '../torchani/resources/ani-1x_8x/sae_linfit.dat')
-energy_shifter = torchani.neurochem.load_sae(sae_file)
-# energy_shifter = torchani.utils.EnergyShifter(None)
+aev_computer = torchani.AEVComputer(Rcr, Rca, EtaR, ShfR, EtaA, Zeta, ShfA, ShfZ, num_species)
+energy_shifter = torchani.utils.EnergyShifter(None)
 species_to_tensor = torchani.utils.ChemicalSymbolsToInts('HCNO')
 
 ###############################################################################
@@ -186,6 +234,12 @@ species_to_tensor = torchani.utils.ChemicalSymbolsToInts('HCNO')
 # range. The second argument defines how to convert species as a list of string
 # to tensor, that is, for all supported chemical symbols, which is correspond to
 # ``0``, which correspond to ``1``, etc.
+
+try:
+    path = os.path.dirname(os.path.realpath(__file__))
+except NameError:
+    path = os.getcwd()
+dspath = os.path.join(path, '../dataset/ani1-up_to_gdb4/ani_gdb_s01.h5')
 
 batch_size = 2560
 
@@ -229,7 +283,7 @@ H_network = torch.nn.Sequential(
     torch.nn.CELU(0.1),
     torch.nn.Linear(128, 96),
     torch.nn.CELU(0.1),
-    torch.nn.Linear(96, 2)
+    torch.nn.Linear(96, 1)
 )
 
 C_network = torch.nn.Sequential(
@@ -239,7 +293,7 @@ C_network = torch.nn.Sequential(
     torch.nn.CELU(0.1),
     torch.nn.Linear(112, 96),
     torch.nn.CELU(0.1),
-    torch.nn.Linear(96, 2)
+    torch.nn.Linear(96, 1)
 )
 
 N_network = torch.nn.Sequential(
@@ -249,7 +303,7 @@ N_network = torch.nn.Sequential(
     torch.nn.CELU(0.1),
     torch.nn.Linear(112, 96),
     torch.nn.CELU(0.1),
-    torch.nn.Linear(96, 2)
+    torch.nn.Linear(96, 1)
 )
 
 O_network = torch.nn.Sequential(
@@ -259,7 +313,7 @@ O_network = torch.nn.Sequential(
     torch.nn.CELU(0.1),
     torch.nn.Linear(112, 96),
     torch.nn.CELU(0.1),
-    torch.nn.Linear(96, 2)
+    torch.nn.Linear(96, 1)
 )
 
 nn = torchani.ANIModel([H_network, C_network, N_network, O_network])
@@ -288,7 +342,7 @@ nn.apply(init_params)
 
 ###############################################################################
 # Let's now create a pipeline of AEV Computer --> Neural Networks.
-modelv = torch.nn.Sequential(aevp_computer, nn, VDWModule).to(device)
+model = torch.nn.Sequential(aev_computer, nn).to(device)
 
 ###############################################################################
 # Now let's setup the optimizers. NeuroChem uses Adam with decoupled weight decay
@@ -309,43 +363,26 @@ modelv = torch.nn.Sequential(aevp_computer, nn, VDWModule).to(device)
 AdamW = torchani.optim.AdamW([
     # H networks
     {'params': [H_network[0].weight]},
-    {'params': [H_network[0].bias]},
     {'params': [H_network[2].weight], 'weight_decay': 0.00001},
-    {'params': [H_network[2].bias]},
     {'params': [H_network[4].weight], 'weight_decay': 0.000001},
-    {'params': [H_network[4].bias]},
     {'params': [H_network[6].weight]},
-    {'params': [H_network[6].bias]},
     # C networks
     {'params': [C_network[0].weight]},
-    {'params': [C_network[0].bias]},
     {'params': [C_network[2].weight], 'weight_decay': 0.00001},
-    {'params': [C_network[2].bias]},
     {'params': [C_network[4].weight], 'weight_decay': 0.000001},
-    {'params': [C_network[4].bias]},
     {'params': [C_network[6].weight]},
-    {'params': [C_network[6].bias]},
     # N networks
     {'params': [N_network[0].weight]},
-    {'params': [N_network[0].bias]},
     {'params': [N_network[2].weight], 'weight_decay': 0.00001},
-    {'params': [N_network[2].bias]},
     {'params': [N_network[4].weight], 'weight_decay': 0.000001},
-    {'params': [N_network[4].bias]},
     {'params': [N_network[6].weight]},
-    {'params': [N_network[6].bias]},
     # O networks
     {'params': [O_network[0].weight]},
-    {'params': [O_network[0].bias]},
     {'params': [O_network[2].weight], 'weight_decay': 0.00001},
-    {'params': [O_network[2].bias]},
     {'params': [O_network[4].weight], 'weight_decay': 0.000001},
-    {'params': [O_network[4].bias]},
     {'params': [O_network[6].weight]},
-    {'params': [O_network[6].bias]},
 ])
 
-'''
 SGD = torch.optim.SGD([
     # H networks
     {'params': [H_network[0].bias]},
@@ -368,12 +405,11 @@ SGD = torch.optim.SGD([
     {'params': [O_network[4].bias]},
     {'params': [O_network[6].bias]},
 ], lr=1e-3)
-'''
 
 ###############################################################################
 # Setting up a learning rate scheduler to do learning rate decay
 AdamW_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(AdamW, factor=0.5, patience=100, threshold=0)
-# SGD_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(SGD, factor=0.5, patience=100, threshold=0)
+SGD_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(SGD, factor=0.5, patience=100, threshold=0)
 
 ###############################################################################
 # Train the model by minimizing the MSE loss, until validation RMSE no longer
@@ -390,9 +426,9 @@ if os.path.isfile(latest_checkpoint):
     checkpoint = torch.load(latest_checkpoint)
     nn.load_state_dict(checkpoint['nn'])
     AdamW.load_state_dict(checkpoint['AdamW'])
-    # SGD.load_state_dict(checkpoint['SGD'])
+    SGD.load_state_dict(checkpoint['SGD'])
     AdamW_scheduler.load_state_dict(checkpoint['AdamW_scheduler'])
-    # SGD_scheduler.load_state_dict(checkpoint['SGD_scheduler'])
+    SGD_scheduler.load_state_dict(checkpoint['SGD_scheduler'])
 
 ###############################################################################
 # During training, we need to validate on validation set and if validation error
@@ -413,7 +449,7 @@ def validate():
         true_energies = batch_y['energies']
         predicted_energies = []
         for chunk_species, chunk_coordinates in batch_x:
-            _, chunk_energies = modelv((chunk_species, chunk_coordinates))
+            _, chunk_energies = model((chunk_species, chunk_coordinates))
             predicted_energies.append(chunk_energies)
         predicted_energies = torch.cat(predicted_energies)
         total_mse += mse_sum(predicted_energies, true_energies).item()
@@ -452,7 +488,7 @@ for _ in range(AdamW_scheduler.last_epoch + 1, max_epochs):
         torch.save(nn.state_dict(), best_model_checkpoint)
 
     AdamW_scheduler.step(rmse)
-    # SGD_scheduler.step(rmse)
+    SGD_scheduler.step(rmse)
 
     tensorboard.add_scalar('validation_rmse', rmse, AdamW_scheduler.last_epoch)
     tensorboard.add_scalar('best_validation_rmse', AdamW_scheduler.best, AdamW_scheduler.last_epoch)
@@ -470,7 +506,7 @@ for _ in range(AdamW_scheduler.last_epoch + 1, max_epochs):
 
         for chunk_species, chunk_coordinates in batch_x:
             num_atoms.append((chunk_species >= 0).to(true_energies.dtype).sum(dim=1))
-            _, chunk_energies = modelv((chunk_species, chunk_coordinates))
+            _, chunk_energies = model((chunk_species, chunk_coordinates))
             predicted_energies.append(chunk_energies)
 
         num_atoms = torch.cat(num_atoms)
@@ -478,10 +514,10 @@ for _ in range(AdamW_scheduler.last_epoch + 1, max_epochs):
         loss = (mse(predicted_energies, true_energies) / num_atoms.sqrt()).mean()
 
         AdamW.zero_grad()
-        # SGD.zero_grad()
+        SGD.zero_grad()
         loss.backward()
         AdamW.step()
-        # SGD.step()
+        SGD.step()
 
         # write current batch loss to TensorBoard
         tensorboard.add_scalar('batch_loss', loss, AdamW_scheduler.last_epoch * len(training) + i)
@@ -489,7 +525,7 @@ for _ in range(AdamW_scheduler.last_epoch + 1, max_epochs):
     torch.save({
         'nn': nn.state_dict(),
         'AdamW': AdamW.state_dict(),
-        # 'SGD': SGD.state_dict(),
+        'SGD': SGD.state_dict(),
         'AdamW_scheduler': AdamW_scheduler.state_dict(),
-        # 'SGD_scheduler': SGD_scheduler.state_dict(),
+        'SGD_scheduler': SGD_scheduler.state_dict(),
     }, latest_checkpoint)

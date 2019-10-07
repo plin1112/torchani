@@ -153,13 +153,13 @@ try:
     path = os.path.dirname(os.path.realpath(__file__))
 except NameError:
     path = os.getcwd()
-dspath = os.path.join(path, '../dataset/COMP6/COMP6v1/DrugBank/drugbank_testset_mod2.h5')
+dspath = os.path.join(path, '../dataset/ani-1x/ani_al-901_validation.h5')
 
 # batch_size = 2560
 batch_size = 256
 
 # checkpoint file for best model and latest model
-best_model_checkpoint = 'dipole-transfer-training-best0-3.pt'
+best_model_checkpoint = 'dipole-transfer-training-best0-4.pt'
 # latest_checkpoint = 'charge-transfer-training-latest.pt'
 
 charge_coefficient = 1.0  # controls the importance of energy loss vs charge loss
@@ -351,8 +351,8 @@ if os.path.isfile(best_model_checkpoint):
 
 ################################################################################
 # Use trained network to calculate the charges for each molecule/conformation
-out_file_name0 = 'comparison_charges_drugbank_testset_mod5-1.txt'
-out_file_name1 = 'comparison_dipoles_drugbank_testset_mod5-1.txt'
+out_file_name0 = 'comparison_charges_ani_al_901_validation_1.txt'
+out_file_name1 = 'comparison_dipoles_ani_al_901_validation_1.txt'
 # out_file_name2 = 'comparison_total_charges_drugbank_testset_mod2.txt'
 f0_out = open(out_file_name0, 'w+')
 f1_out = open(out_file_name1, 'w+')
