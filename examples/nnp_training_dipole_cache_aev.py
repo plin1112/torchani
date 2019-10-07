@@ -22,8 +22,8 @@ try:
     path = os.path.dirname(os.path.realpath(__file__))
 except NameError:
     path = os.getcwd()
-training_path = os.path.join(path, '../dataset/COMP6/COMP6v1/DrugBank/drugbank_testset_mod2_training.h5')
-validation_path = os.path.join(path, '../dataset/COMP6/COMP6v1/DrugBank/drugbank_testset_mod2_validation.h5')  # noqa: E501
+training_path = os.path.join(path, '../dataset/ani-1x/ani_al-901_training.h5')
+validation_path = os.path.join(path, '../dataset/ani-1x/ani_al-901_validation.h5')  # noqa: E501
 
 # device to run the training
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -36,18 +36,18 @@ batch_size = 256
 # but we do need to generate a disk cache for datasets
 const_file = os.path.join(path, '../torchani/resources/ani-1x_8x/rHCNO-5.2R_16-3.5A_a4-8.params')
 sae_file = os.path.join(path, '../torchani/resources/ani-1x_8x/sae_linfit.dat')
-training_cache = './nnp_dipole_training_cache'
-validation_cache = './nnp_dipole_validation_cache'
+training_cache = './ani_al-901_training_cache'
+validation_cache = './ani_al-901_validation_cache'
 
 # If the cache dirs already exists, then we assume these data has already been
 # cached and skip the generation part.
 if not os.path.exists(training_cache):
     torchani.data.cache_aev(training_cache, training_path, batch_size, device,
                             const_file, True, sae_file,
-                            properties=['energies', 'dipole'], atomic_properties=['cm5']
+                            properties=('energies', 'dipole'), atomic_properties=('cm5', 'hirshfeld', 'forces')
                             )
 if not os.path.exists(validation_cache):
     torchani.data.cache_aev(validation_cache, validation_path, batch_size,
                             device, const_file, True, sae_file,
-                            properties=['energies', 'dipole'], atomic_properties=['cm5']
+                            properties=('energies', 'dipole'), atomic_properties=('cm5', 'hirshfeld', 'forces')
                             )

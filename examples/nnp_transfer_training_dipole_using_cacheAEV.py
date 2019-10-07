@@ -247,8 +247,8 @@ except NameError:
 batch_size = 256
 
 # checkpoint file for best model and latest model
-best_model_checkpoint = 'dipole-transfer-training-best0-3.pt'
-latest_checkpoint = 'dipole-transfer-training-latest0-3.pt'
+best_model_checkpoint = 'dipole-transfer-training-best0-4.pt'
+latest_checkpoint = 'dipole-transfer-training-latest0-4.pt'
 
 # save existing model parameters into checkpoint file format
 const_file = os.path.join(path, '../torchani/resources/ani-1x_8x/rHCNO-5.2R_16-3.5A_a4-8.params')  # noqa: E501
@@ -260,7 +260,7 @@ ani_1x_model = 'ani-1x_t0_model0.pt'
 if not os.path.exists(ani_1x_model):
     torch.save(model.state_dict(), ani_1x_model)
 
-max_epochs = 300
+max_epochs = 100
 early_stopping_learning_rate = 1.0E-5
 dipole_coefficient = 1.0  # controls the importance of dipole loss
 total_charge_coefficient = 10000.0  # controls the importance of sum of charge loss
@@ -269,8 +269,8 @@ total_charge_coefficient = 10000.0  # controls the importance of sum of charge l
 # The code to create the dataset is a bit different: we need to manually
 # specify that ``atomic_properties=['cm5']`` so that charges will be read
 # from hdf5 files.
-training_cache = './nnp_dipole_training_cache'
-validation_cache = './nnp_dipole_validation_cache'
+training_cache = './ani_al-901_training_cache'
+validation_cache = './ani_al-901_validation_cache'
 
 training_generator = torchani.data.AEVPCacheLoader(training_cache, selection=['dipole', 'coordinates'])
 validation_generator = torchani.data.AEVPCacheLoader(validation_cache, selection=['dipole', 'coordinates'])

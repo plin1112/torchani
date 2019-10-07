@@ -33,7 +33,7 @@ validation_path = os.path.join(path, '../dataset/ani1-up_to_gdb4/ani_gdb_s01.h5'
 model_checkpoint = 'model.pt'
 
 # max epochs to run the training
-max_epochs = 20
+max_epochs = 50
 
 # Compute training RMSE every this steps. Since the training set is usually
 # huge and the loss funcition does not directly gives us RMSE, we need to
