@@ -536,3 +536,120 @@ class AEVPComputer(torch.nn.Module):
             cutoff = max(self.Rcr, self.Rca)
             shifts = compute_shifts(cell, pbc, cutoff)
         return species, compute_aev(species, coordinates, cell, shifts, self.triu_index, self.constants(), self.sizes), coordinates
+
+class AEVDualComputer(torch.nn.Module):
+    r"""The AEV computer that takes two set of coordinates as input and outputs two set of aevs.
+
+    Arguments:
+        Rcr (float): :math:`R_C` in equation (2) when used at equation (3)
+            in the `ANI paper`_.
+        Rca (float): :math:`R_C` in equation (2) when used at equation (4)
+            in the `ANI paper`_.
+        EtaR (:class:`torch.Tensor`): The 1D tensor of :math:`\eta` in
+            equation (3) in the `ANI paper`_.
+        ShfR (:class:`torch.Tensor`): The 1D tensor of :math:`R_s` in
+            equation (3) in the `ANI paper`_.
+        EtaA (:class:`torch.Tensor`): The 1D tensor of :math:`\eta` in
+            equation (4) in the `ANI paper`_.
+        Zeta (:class:`torch.Tensor`): The 1D tensor of :math:`\zeta` in
+            equation (4) in the `ANI paper`_.
+        ShfA (:class:`torch.Tensor`): The 1D tensor of :math:`R_s` in
+            equation (4) in the `ANI paper`_.
+        ShfZ (:class:`torch.Tensor`): The 1D tensor of :math:`\theta_s` in
+            equation (4) in the `ANI paper`_.
+        num_species (int): Number of supported atom types.
+
+    .. _ANI paper:
+        http://pubs.rsc.org/en/Content/ArticleLanding/2017/SC/C6SC05720A#!divAbstract
+    """
+    __constants__ = ['Rcr', 'Rca', 'num_species', 'radial_sublength',
+                     'radial_length', 'angular_sublength', 'angular_length',
+                     'aev_length']
+
+    def __init__(self, Rcr, Rca, EtaR, ShfR, EtaA, Zeta, ShfA, ShfZ, num_species):
+        super(AEVDualComputer, self).__init__()
+        self.Rcr = Rcr
+        self.Rca = Rca
+        assert Rca <= Rcr, "Current implementation of AEVComputer assumes Rca <= Rcr"
+        # convert constant tensors to a ready-to-broadcast shape
+        # shape convension (..., EtaR, ShfR)
+        self.register_buffer('EtaR', EtaR.view(-1, 1))
+        self.register_buffer('ShfR', ShfR.view(1, -1))
+        # shape convension (..., EtaA, Zeta, ShfA, ShfZ)
+        self.register_buffer('EtaA', EtaA.view(-1, 1, 1, 1))
+        self.register_buffer('Zeta', Zeta.view(1, -1, 1, 1))
+        self.register_buffer('ShfA', ShfA.view(1, 1, -1, 1))
+        self.register_buffer('ShfZ', ShfZ.view(1, 1, 1, -1))
+
+        self.num_species = num_species
+        # The length of radial subaev of a single species
+        self.radial_sublength = self.EtaR.numel() * self.ShfR.numel()
+        # The length of full radial aev
+        self.radial_length = self.num_species * self.radial_sublength
+        # The length of angular subaev of a single species
+        self.angular_sublength = self.EtaA.numel() * self.Zeta.numel() * self.ShfA.numel() * self.ShfZ.numel()
+        # The length of full angular aev
+        self.angular_length = (self.num_species * (self.num_species + 1)) // 2 * self.angular_sublength
+        # The length of full aev
+        self.aev_length = self.radial_length + self.angular_length
+        self.sizes = self.num_species, self.radial_sublength, self.radial_length, self.angular_sublength, self.angular_length, self.aev_length
+
+        self.register_buffer('triu_index', triu_index(num_species))
+
+        # Set up default cell and compute default shifts.
+        # These values are used when cell and pbc switch are not given.
+        cutoff = max(self.Rcr, self.Rca)
+        default_cell = torch.eye(3, dtype=self.EtaR.dtype, device=self.EtaR.device)
+        default_pbc = torch.zeros(3, dtype=torch.bool, device=self.EtaR.device)
+        default_shifts = compute_shifts(default_cell, default_pbc, cutoff)
+        self.register_buffer('default_cell', default_cell)
+        self.register_buffer('default_shifts', default_shifts)
+
+    def constants(self):
+        return self.Rcr, self.EtaR, self.ShfR, self.Rca, self.ShfZ, self.EtaA, self.Zeta, self.ShfA
+
+    # @torch.jit.script_method
+    def forward(self, input_):
+        """Compute AEVs
+
+        Arguments:
+            input_ (tuple): Can be one of the following two cases:
+
+                If you don't care about periodic boundary conditions at all,
+                then input can be a tuple of two tensors: species and coordinates.
+                species must have shape ``(C, A)`` and coordinates must have
+                shape ``(C, A, 3)``, where ``C`` is the number of molecules
+                in a chunk, and ``A`` is the number of atoms.
+
+                If you want to apply periodic boundary conditions, then the input
+                would be a tuple of four tensors: species, coordinates, cell, pbc
+                where species and coordinates are the same as described above, cell
+                is a tensor of shape (3, 3) of the three vectors defining unit cell:
+
+                .. code-block:: python
+
+                    tensor([[x1, y1, z1],
+                            [x2, y2, z2],
+                            [x3, y3, z3]])
+
+                and pbc is boolean vector of size 3 storing if pbc is enabled
+                for that direction.
+
+        Returns:
+            tuple: Species and AEVs. species are the species from the input
+            unchanged, and AEVs is a tensor of shape
+            ``(C, A, self.aev_length())``
+        """
+        if len(input_) == 3:
+            species, coordinates1, coordinates2 = input_
+            cell = self.default_cell
+            shifts = self.default_shifts
+        else:
+            assert len(input_) == 5
+            species, coordinates1, coordinates2, cell, pbc = input_
+            cutoff = max(self.Rcr, self.Rca)
+            shifts = compute_shifts(cell, pbc, cutoff)
+
+        aev1 = compute_aev(species, coordinates1, cell, shifts, self.triu_index, self.constants(), self.sizes)
+        aev2 = compute_aev(species, coordinates2, cell, shifts, self.triu_index, self.constants(), self.sizes)
+        return species, aev1, aev2
