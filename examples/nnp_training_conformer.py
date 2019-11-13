@@ -60,16 +60,21 @@ def convert_dual_coords(batch_y):
         # coords1_array = np.empty(chunk_coordinates[0].shape, dtpye=np.float32)
         # coords2_array = np.empty(chunk_coordinates[0].shape, dtpye=np.float32)
         unique_species, loc, occur_count = np.unique(chunk_species.numpy(), return_inverse=True, return_counts=True, axis=0)
+        # the current implementation assume small number of molecules has little conformers
+        # it might cause issues when there are too many molecules with small number of conformers
         n_single_occur = len(np.asarray(occur_count == 1).nonzero()[0])
         n_double_occur = len(np.asarray(occur_count == 2).nonzero()[0])
         # n_triple_occur = len(np.asarray(occur_count == 3).nonzero()[0])
         n_multi_occur = len(np.asarray(occur_count > 3).nonzero()[0])
+        max_extra_allowed = 0
+        for multi_occur in np.asarray(occur_count > 3).nonzero()[0]:
+            max_extra_allowed += int(multi_occur * (multi_occur - 1) / 2) - multi_occur
         n_reduced = n_single_occur + n_double_occur
+        if max_extra_allowed < n_reduced:
+            continue
         n_extra = n_reduced // n_multi_occur
-        # the current implementation assume small number of molecules has little conformers
-        # it might cause issues when there are two many molecules with small number of conformers
         for i, chunk_unique_species in enumerate(unique_species):
-            all_loc = np.asarray(loc == 1).nonzero()[0]
+            all_loc = np.asarray(loc == i).nonzero()[0]
             if len(all_loc) == 1:
                 pass
             elif len(all_loc) < 4: # in case of 2 and 3
@@ -83,7 +88,7 @@ def convert_dual_coords(batch_y):
             elif len(all_loc) > 3: # in case of 4 or more
                 n_sample = len(all_loc)
                 if n_reduced > 0:
-                    extra_allowed = len(all_loc) * (len(all_loc) - 1) / 2 - len(all_loc)
+                    extra_allowed = int(len(all_loc) * (len(all_loc) - 1) / 2) - len(all_loc)
                     extra_used = min(n_reduced, n_extra, extra_allowed)
                     n_reduced -= extra_used
                     n_sample += extra_used
@@ -101,7 +106,7 @@ def convert_dual_coords(batch_y):
             new_chunk_dict['ene1'] = torch.FloatTensor(ene1_list)
             new_chunk_dict['ene2'] = torch.FloatTensor(ene2_list)
             # new_chunk_dict['ene_diff'] = torch.FloatTensor(ene_diff)
-            new_batch.append(new_chunk_dict)
+        new_batch.append(new_chunk_dict)
         idx_start += chunk_len
 
     return new_batch
@@ -191,8 +196,8 @@ EtaA = torch.tensor([8.0000000e+00], device=device)
 ShfA = torch.tensor([9.0000000e-01, 1.5500000e+00, 2.2000000e+00, 2.8500000e+00], device=device)
 num_species = 4
 aev_dual_computer = torchani.aev.AEVDualComputer(Rcr, Rca, EtaR, ShfR, EtaA, Zeta, ShfA, ShfZ, num_species)
-energy_shifter = torchani.utils.EnergyShifter(None)
-species_to_tensor = torchani.utils.ChemicalSymbolsToInts('HCNO')
+# energy_shifter = torchani.utils.EnergyShifter(None)
+species_to_tensor = torchani.utils.ChemicalSymbolsToInts("HCNO")
 
 ###############################################################################
 # Now let's setup datasets. These paths assumes the user run this script under
@@ -210,7 +215,12 @@ try:
     path = os.path.dirname(os.path.realpath(__file__))
 except NameError:
     path = os.getcwd()
-dspath = os.path.join(path, '../dataset/ani1-up_to_gdb4/ani_gdb_s01.h5')
+# dspath = os.path.join(path, '../dataset/ani1x-20191001_wb97x_dz_dipole.h5')
+dspath = os.path.join(path, '../dataset/ani-1x/ani_al-901_validation.h5')
+
+# Now let's read self energies and construct energy shifter.
+sae_file = os.path.join(path, '../torchani/resources/ani-1x_8x/sae_linfit.dat')  # noqa: E501
+energy_shifter = torchani.neurochem.load_sae(sae_file)
 
 batch_size = 2560
 
@@ -308,8 +318,24 @@ def init_params(m):
         torch.nn.init.kaiming_normal_(m.weight, a=1.0)
         torch.nn.init.zeros_(m.bias)
 
+ani_1x_model = 'ani-1x_8x_model0.pt'
 
-nn.apply(init_params)
+if os.path.isfile(ani_1x_model):
+    checkpoint = torch.load(ani_1x_model)
+    nn.load_state_dict(checkpoint)
+    for i_module in range(4):
+        for i_layer in range(0, 7, 2):
+            if i_layer < 0:
+                print('nn.module:', i_module, ' i_module.layer', i_layer, ' are fixed.')
+                for param in nn[i_module][i_layer].parameters():
+                    print(param.size())
+                    param.requires_grad = False
+            else:
+                print('nn.module:', i_module, ' i_module.layer', i_layer, ' are free.')
+                for param in nn[i_module][i_layer].parameters():
+                    print(param.size())
+else:
+    nn.apply(init_params)
 
 ###############################################################################
 # Let's now create a pipeline of AEV Computer --> Neural Networks.
@@ -444,8 +470,8 @@ tensorboard = torch.utils.tensorboard.SummaryWriter()
 mse = torch.nn.MSELoss(reduction='none')
 
 print("training starting from epoch", AdamW_scheduler.last_epoch + 1)
-max_epochs = 200
-early_stopping_learning_rate = 1.0E-5
+max_epochs = 1200
+early_stopping_learning_rate = 1.0E-6
 best_model_checkpoint = 'conf_best.pt'
 
 for _ in range(AdamW_scheduler.last_epoch + 1, max_epochs):

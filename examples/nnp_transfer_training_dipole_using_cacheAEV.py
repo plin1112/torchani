@@ -69,20 +69,6 @@ class ANICModel(torch.nn.ModuleList):
         output = output.view_as(species)
         return species, output
 
-def dipole_moment(coords_charges):
-    """
-    Calculates dipole moment of the molecule.
-    coords_charges: tuple of atomic coordinates and point charges
-    coords is a 3-dimension tensor (mol, atom, xyz)
-    charges is a 2-dimension tensor (mol, atom)
-    """
-    # toDebye = 4.80320425 : use if in the unit of Debye
-    coords, charges = coords_charges
-    charges = charges.unsqueeze(-1)
-    dipoles = coords * charges
-    dipoles = torch.sum(dipoles, dim=1)
-    return dipoles
-
 class ANIDModel(torch.nn.ModuleList):
     """ANID model that compute dipole properties from species, coordinates and AEVs.
 
@@ -113,14 +99,31 @@ class ANIDModel(torch.nn.ModuleList):
         super(ANIDModel, self).__init__(modules)
         self.padding_fill = padding_fill
 
+    def dipole_moment(self, coords, charges):
+        """
+        Calculates dipole moment of the molecule.
+        coords_charges: tuple of atomic coordinates and point charges
+        coords is a 3-dimension tensor (mol, atom, xyz)
+        charges is a 2-dimension tensor (mol, atom)
+        """
+        # toDebye = 4.80320425 : use if in the unit of Debye
+        # coords, charges = coords_charges
+        charges = charges.unsqueeze(-1)
+        dipoles = coords * charges
+        dipoles = torch.sum(dipoles, dim=1)
+        return dipoles
+
     def forward(self, species_aev, coordinates):
         species, aev = species_aev
+        species = species.to(device)
+        aev = aev.to(device)
+        coordinates = coordinates.to(device)
         species_ = species.flatten()
         present_species = torchani.utils.present_species(species)
         aev = aev.flatten(0, 1)
 
         output = torch.full_like(species_, self.padding_fill,
-                                 dtype=aev.dtype)
+                                 dtype=aev.dtype, device=device)
         for i in present_species:
             mask = (species_ == i)
             input_ = aev.index_select(0, mask.nonzero().squeeze())
@@ -135,7 +138,7 @@ class ANIDModel(torch.nn.ModuleList):
         set_zero = torch.full_like(species_, self.padding_fill, dtype=total_charges.dtype)
         output.masked_scatter_(mask2, set_zero)
         # total_charges = torch.sum(output, dim=1) # return the residual total_charges before correction
-        return species, dipole_moment((coordinates, output)), excess_charge.squeeze(-1)
+        return species, self.dipole_moment(coordinates, output), excess_charge.squeeze(-1)
 
 class DipoleModule(torch.nn.Module):
     r"""The Dipole Module that takes coordinates and charges as input and outputs dipoles of molecules.
@@ -223,6 +226,7 @@ class ELECModule(torch.nn.Module):
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# device = torch.device('cpu')
 
 Rcr = 5.2000e+00
 Rca = 3.5000e+00
@@ -260,7 +264,7 @@ ani_1x_model = 'ani-1x_t0_model0.pt'
 if not os.path.exists(ani_1x_model):
     torch.save(model.state_dict(), ani_1x_model)
 
-max_epochs = 100
+max_epochs = 900
 early_stopping_learning_rate = 1.0E-5
 dipole_coefficient = 1.0  # controls the importance of dipole loss
 total_charge_coefficient = 10000.0  # controls the importance of sum of charge loss
@@ -269,8 +273,8 @@ total_charge_coefficient = 10000.0  # controls the importance of sum of charge l
 # The code to create the dataset is a bit different: we need to manually
 # specify that ``atomic_properties=['cm5']`` so that charges will be read
 # from hdf5 files.
-training_cache = './ani_al-901_training_cache'
-validation_cache = './ani_al-901_validation_cache'
+training_cache = './nnp_dipole_training_cache'
+validation_cache = './nnp_dipole_validation_cache'
 
 training_generator = torchani.data.AEVPCacheLoader(training_cache, selection=['dipole', 'coordinates'])
 validation_generator = torchani.data.AEVPCacheLoader(validation_cache, selection=['dipole', 'coordinates'])
@@ -329,7 +333,8 @@ O_network = torch.nn.Sequential(
     torch.nn.Linear(96, 1)
 )
 
-nn = ANIDModel([H_network, C_network, N_network, O_network]).to(device)
+nn = ANIDModel([H_network, C_network, N_network, O_network])
+nn = nn.to(device)
 # print(nn)
 
 ###############################################################################
@@ -485,7 +490,7 @@ def validate():
     for valid_batch, output, valid_labels in validation_generator:
         # species_aevs, output obtained from validation_generator
         predicted_dipoles = torch.Tensor().to(device)
-        true_dipoles = output['dipole']
+        true_dipoles = output['dipole'].to(device)
         num_mols = true_dipoles.shape[0]
         for chunk, chunk_labels in zip(valid_batch, valid_labels):
             # chunk_species, chunk_aevs = chunk
@@ -498,7 +503,7 @@ def validate():
             # num_mols += chunk_num_mols
 
         count += num_mols
-        mol_charges = torch.zeros(total_charges.shape, dtype=total_charges.dtype)
+        mol_charges = torch.zeros(total_charges.shape, dtype=total_charges.dtype, device=device)
         mol_charges_mse += mse(mol_charges, total_charges).sum()
         total_mse += mse(true_dipoles, predicted_dipoles).sum()
     total_mse = total_mse / count
@@ -548,7 +553,7 @@ for _ in range(AdamW_scheduler.last_epoch + 1, max_epochs):
 
         predicted_dipoles = torch.Tensor().to(device)
         batch_total_charges = torch.Tensor().to(device)
-        true_dipoles = output['dipole']
+        true_dipoles = output['dipole'].to(device)
         num_mols = true_dipoles.shape[0]
         dipole_loss = 0.0
         mol_charges_loss = 0.0
@@ -557,6 +562,7 @@ for _ in range(AdamW_scheduler.last_epoch + 1, max_epochs):
         for chunk, chunk_labels in zip(train_batch, train_labels):
             # chunk_species, chunk_aevs = chunk
             # chunk_true_dipoles = chunk_labels['dipole']
+            # chunk = chunk.to(device)
             chunk_coords = chunk_labels['coordinates']
             _, chunk_dipoles, chunk_total_charges = nn(chunk, chunk_coords)
             # true_dipoles = torch.cat((true_dipoles, torch.flatten(chunk_true_dipoles)))
@@ -565,7 +571,7 @@ for _ in range(AdamW_scheduler.last_epoch + 1, max_epochs):
             # chunk_num_mols = torch.tensor(chunk_dipoles.shape[0]).to(num_mols.dtype)
             # num_mols += chunk_num_mols
 
-        mol_charges = torch.zeros(batch_total_charges.shape)
+        mol_charges = torch.zeros(batch_total_charges.shape, device=device)
         mol_charges_loss += mse(mol_charges, batch_total_charges).sum() / num_mols
         dipole_loss += mse(true_dipoles, predicted_dipoles).sum() / num_mols
 

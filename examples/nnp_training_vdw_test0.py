@@ -68,6 +68,8 @@ class ANIVModel(torch.nn.ModuleList):
         species, aev, coordinates = species_aev_coordinates
         # species, aev = species_aev
         species_ = species.flatten()
+        output_shape = list(species_.size())
+        output_shape.append(2)
         present_species = utils.present_species(species)
         aev = aev.flatten(0, 1)
 
@@ -75,14 +77,12 @@ class ANIVModel(torch.nn.ModuleList):
         output = torch.full_like(species_, self.padding_fill, dtype=aev.dtype)
         output_c6 = torch.full_like(species_, self.padding_fill, dtype=aev.dtype)
 
-        # taking C6 of Wu & Yang and convert: J. Chem. Phys., 116, 515 (2002)
-        c6_HCNO = [127.512, 1181.763, 878.922, 560.142]
         for i in present_species:
             mask = (species_ == i)
             input_ = aev.index_select(0, mask.nonzero().squeeze())
             res = self[i](input_)
-            output.masked_scatter_(mask, res.squeeze())
-            output_c6.masked_fill_(mask, c6_HCNO[i])
+            output.masked_scatter_(mask, res[:, 0].squeeze())
+            output_c6.masked_scatter_(mask, res[:, 1].squeeze())
         aa_energies = output.view_as(species)
         c6 = output_c6.view_as(species)
         return species, self.reducer(aa_energies, dim=1), c6, coordinates
@@ -112,11 +112,10 @@ class VDWModule(torch.nn.Module):
         # Converstion factor to atomic unit (45.54 ~ 1.0/0.529^6)
         # suitable for HCNO and probably some other atoms/ions
         # (mol, 1, c6_atom) - (mol, c6_atom, 1) = > (mol, c6_atom1, c6_atom2)
-        # c6_ = 10000.0 / (1.0 + torch.exp(c6_))
+        c6_ = 1000.0 / (1.0 + torch.exp(c6_))
         c6_ij = 2.0 * c6_.unsqueeze(1) * c6_.unsqueeze(2) / (c6_.unsqueeze(1) + c6_.unsqueeze(2))
         vdw_c6 = c6_ij / dist6
         vdw_c6 = torch.triu(vdw_c6, diagonal=1)
-        vdw_c6.masked_fill_(table_masks, 0.0)
         # size = vdw_c6.shape[1]
         # vdw_c6[:, range(size), range(size)] = 0.0
         assert not (torch.isnan(vdw_c6)).any()
@@ -238,7 +237,7 @@ H_network = torch.nn.Sequential(
     torch.nn.CELU(0.1),
     torch.nn.Linear(128, 96),
     torch.nn.CELU(0.1),
-    torch.nn.Linear(96, 1)
+    torch.nn.Linear(96, 2)
 )
 
 C_network = torch.nn.Sequential(
@@ -248,7 +247,7 @@ C_network = torch.nn.Sequential(
     torch.nn.CELU(0.1),
     torch.nn.Linear(112, 96),
     torch.nn.CELU(0.1),
-    torch.nn.Linear(96, 1)
+    torch.nn.Linear(96, 2)
 )
 
 N_network = torch.nn.Sequential(
@@ -258,7 +257,7 @@ N_network = torch.nn.Sequential(
     torch.nn.CELU(0.1),
     torch.nn.Linear(112, 96),
     torch.nn.CELU(0.1),
-    torch.nn.Linear(96, 1)
+    torch.nn.Linear(96, 2)
 )
 
 O_network = torch.nn.Sequential(
@@ -268,7 +267,7 @@ O_network = torch.nn.Sequential(
     torch.nn.CELU(0.1),
     torch.nn.Linear(112, 96),
     torch.nn.CELU(0.1),
-    torch.nn.Linear(96, 1)
+    torch.nn.Linear(96, 2)
 )
 
 nn = ANIVModel([H_network, C_network, N_network, O_network])
@@ -444,7 +443,7 @@ tensorboard = torch.utils.tensorboard.SummaryWriter()
 mse = torch.nn.MSELoss(reduction='none')
 
 print("training starting from epoch", AdamW_scheduler.last_epoch + 1)
-max_epochs = 1500
+max_epochs = 200
 early_stopping_learning_rate = 1.0E-5
 best_model_checkpoint = 'nnp_vdw_01_best.pt'
 
