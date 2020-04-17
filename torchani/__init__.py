@@ -24,14 +24,14 @@ formats of NeuroChem at :attr:`torchani.neurochem`, and more at :attr:`torchani.
 """
 
 from .utils import EnergyShifter
-from .nn import ANIModel, Ensemble
+from .nn import ANIModel, Ensemble, SpeciesConverter
 from .aev import AEVComputer
 from . import utils
 from . import neurochem
 from . import models
 from . import optim
+from . import units
 from pkg_resources import get_distribution, DistributionNotFound
-import sys
 
 try:
     __version__ = get_distribution(__name__).version
@@ -39,8 +39,8 @@ except DistributionNotFound:
     # package is not installed
     pass
 
-__all__ = ['AEVComputer', 'EnergyShifter', 'ANIModel', 'Ensemble',
-           'utils', 'neurochem', 'models', 'optim']
+__all__ = ['AEVComputer', 'EnergyShifter', 'ANIModel', 'Ensemble', 'SpeciesConverter',
+           'utils', 'neurochem', 'models', 'optim', 'units']
 
 try:
     from . import ase  # noqa: F401
@@ -48,10 +48,8 @@ try:
 except ImportError:
     pass
 
-
-if sys.version_info[0] > 2:
-    try:
-        from . import data  # noqa: F401
-        __all__.append('data')
-    except ImportError:
-        pass
+try:
+    from . import data  # noqa: F401
+    __all__.append('data')
+except ImportError:
+    pass
