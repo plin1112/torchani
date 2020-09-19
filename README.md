@@ -1,3 +1,7 @@
+# :warning: Warning!
+### This is an experimental version of TorchANI for internal use by the Roitberg group. One may not interpret this as a stable version. Please refer to the stable version [here.](https://github.com/aiqm/torchani) 
+
+
 # <img src=https://raw.githubusercontent.com/aiqm/torchani/master/logo1.png width=180/>  Accurate Neural Network Potential on PyTorch
 
 Metrics:
@@ -30,6 +34,7 @@ TorchANI is a pytorch implementation of ANI. It is currently under alpha release
 
 <img src=https://raw.githubusercontent.com/aiqm/torchani/master/logo2.png width=500/>
 
+
 # Install
 
 TorchANI requires the latest preview version of PyTorch. You can install PyTorch by the following commands (assuming cuda10):
@@ -59,15 +64,22 @@ To run the tests and examples, you must manually download a data package
 ./download.sh
 ```
 
-# Paper
 
-The original ANI-1 paper is:
+# Citation
 
-* Smith JS, Isayev O, Roitberg AE. ANI-1: an extensible neural network potential with DFT accuracy at force field computational cost. Chemical science. 2017;8(4):3192-203.
+Please cite the following paper if you use TorchANI 
 
-We are planning a seperate paper for TorchANI, it will be available when we are ready for beta release of TorchANI.
+* Xiang Gao, Farhad Ramezanghorbani, Olexandr Isayev, Justin S. Smith, and Adrian E. Roitberg. *TorchANI: A Free and Open Source PyTorch Based Deep Learning Implementation of the ANI Neural Network Potentials*. Journal of Chemical Information and Modeling 2020 60 (7), 3408-3415, [![DOI for Citing](https://img.shields.io/badge/DOI-10.1021%2Facs.jcim.0c00451-green.svg)](https://doi.org/10.1021/acs.jcim.0c00451)
 
-See also: [isayev/ASE_ANI](https://github.com/isayev/ASE_ANI)
+[![JCIM Cover](https://pubs.acs.org/na101/home/literatum/publisher/achs/journals/content/jcisd8/2020/jcisd8.2020.60.issue-7/jcisd8.2020.60.issue-7/20200727/jcisd8.2020.60.issue-7.largecover.jpg)](https://pubs.acs.org/toc/jcisd8/60/7)
+
+* Please refer to [isayev/ASE_ANI](https://github.com/isayev/ASE_ANI) for ANI model references.
+
+# ANI model parameters
+All the ANI model parameters including (ANI2x, ANI1x, and ANI1ccx) are accessible from the following repositories:
+- [isayev/ASE_ANI](https://github.com/isayev/ASE_ANI)
+- [aiqm/ani-model-zoo](https://github.com/aiqm/ani-model-zoo)
+
 
 # Develop
 
@@ -90,6 +102,7 @@ To manually run unit tests, do `python setup.py nosetests`
 If you opened a pull request, you could see your generated documents at https://aiqm.github.io/torchani-test-docs/ after you `docs` check succeed.
 Keep in mind that this repository is only for the purpose of convenience of development, and only keeps the latest push.
 The CI runing for other pull requests might overwrite this repository. You could rerun the `docs` check to overwrite this repo to your build.
+
 
 # Note to TorchANI developers
 

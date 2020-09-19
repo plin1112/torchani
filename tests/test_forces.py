@@ -12,16 +12,10 @@ class TestForce(unittest.TestCase):
 
     def setUp(self):
         self.tolerance = 1e-5
-        ani1x = torchani.models.ANI1x()
-        self.aev_computer = ani1x.aev_computer
-        self.nnp = ani1x.neural_networks[0]
+        model = torchani.models.ANI1x(model_index=0)
+        self.aev_computer = model.aev_computer
+        self.nnp = model.neural_networks
         self.model = torchani.nn.Sequential(self.aev_computer, self.nnp)
-
-    def random_skip(self):
-        return False
-
-    def transform(self, x):
-        return x
 
     def testIsomers(self):
         for i in range(N):
@@ -31,9 +25,6 @@ class TestForce(unittest.TestCase):
                 coordinates = torch.from_numpy(coordinates)
                 species = torch.from_numpy(species)
                 forces = torch.from_numpy(forces)
-                coordinates = self.transform(coordinates)
-                species = self.transform(species)
-                forces = self.transform(forces)
                 coordinates.requires_grad_(True)
                 _, energies = self.model((species, coordinates))
                 derivative = torch.autograd.grad(energies.sum(),
@@ -51,9 +42,6 @@ class TestForce(unittest.TestCase):
                 coordinates = torch.from_numpy(coordinates)
                 species = torch.from_numpy(species)
                 forces = torch.from_numpy(forces)
-                coordinates = self.transform(coordinates)
-                species = self.transform(species)
-                forces = self.transform(forces)
                 coordinates.requires_grad_(True)
                 species_coordinates.append(torchani.utils.broadcast_first_dim(
                     {'species': species, 'coordinates': coordinates}))

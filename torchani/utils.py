@@ -8,12 +8,8 @@ from torchani.units import sqrt_mhessian2invcm, sqrt_mhessian2milliev, mhessian2
 from .nn import SpeciesEnergies
 
 
-def empty_list():
-    return []
-
-
 def stack_with_padding(properties, padding):
-    output = defaultdict(empty_list)
+    output = defaultdict(list)
     for p in properties:
         for k, v in p.items():
             output[k].append(torch.as_tensor(v))
@@ -75,7 +71,6 @@ def pad_atomic_properties(properties, padding_values=defaultdict(lambda: 0.0, sp
     return output
 
 
-# @torch.jit.script
 def present_species(species):
     """Given a vector of species of atoms, compute the unique species present.
 
@@ -156,7 +151,7 @@ class EnergyShifter(torch.nn.Module):
     """
 
     def __init__(self, self_energies, fit_intercept=False):
-        super(EnergyShifter, self).__init__()
+        super().__init__()
 
         self.fit_intercept = fit_intercept
         if self_energies is not None:
@@ -229,7 +224,8 @@ class ChemicalSymbolsToInts:
 
     Arguments:
         all_species (:class:`collections.abc.Sequence` of :class:`str`):
-            sequence of all supported species, in order.
+        sequence of all supported species, in order (it is recommended to order
+        according to atomic number).
     """
 
     def __init__(self, all_species):
@@ -317,7 +313,7 @@ def vibrational_analysis(masses, hessian, mode_type='MDU', unit='cm^-1'):
     elif unit == 'cm^-1':
         unit_converter = sqrt_mhessian2invcm
     else:
-        raise ValueError(f'Only meV and cm^-1 are supported right now')
+        raise ValueError('Only meV and cm^-1 are supported right now')
 
     assert hessian.shape[0] == 1, 'Currently only supporting computing one molecule a time'
     # Solving the eigenvalue problem: Hq = w^2 * T q
@@ -359,7 +355,7 @@ def vibrational_analysis(masses, hessian, mode_type='MDU', unit='cm^-1'):
 
 
 def get_atomic_masses(species):
-    r"""Convert a tensor of znumbers into a tensor of atomic masses
+    r"""Convert a tensor of atomic numbers ("periodic table indices") into a tensor of atomic masses
 
     Atomic masses supported are the first 119 elements, and are taken from:
 
@@ -410,7 +406,7 @@ def get_atomic_masses(species):
            269.1338    , 278.156     , 281.165     , 281.166     , # noqa
            285.177     , 286.182     , 289.19      , 289.194     , # noqa
            293.204     , 293.208     , 294.214], # noqa
-           dtype=torch.double, device=species.device)
+        dtype=torch.double, device=species.device) # noqa
     masses = default_atomic_masses[species]
     return masses
 

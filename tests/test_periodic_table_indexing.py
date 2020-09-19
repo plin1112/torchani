@@ -29,7 +29,7 @@ class TestSpeciesConverterJIT(TestSpeciesConverter):
         self.c = torch.jit.script(self.c)
 
 
-class TestBuiltinNetPeriodicTableIndex(unittest.TestCase):
+class TestBuiltinEnsemblePeriodicTableIndex(unittest.TestCase):
 
     def setUp(self):
         self.model1 = torchani.models.ANI1x()
@@ -40,7 +40,7 @@ class TestBuiltinNetPeriodicTableIndex(unittest.TestCase):
                                           [0.45554739, 0.54289633, 0.81170881],
                                           [0.66091919, -0.16799635, -0.91037834]]],
                                         requires_grad=True)
-        self.species1 = self.model1.species_to_tensor('CHHHH').unsqueeze(0)
+        self.species1 = self.model1.species_to_tensor(['C', 'H', 'H', 'H', 'H']).unsqueeze(0)
         self.species2 = torch.tensor([[6, 1, 1, 1, 1]])
 
     def testCH4Ensemble(self):

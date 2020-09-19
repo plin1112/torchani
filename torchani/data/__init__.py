@@ -9,19 +9,51 @@ To do transformation, just do `it.transformation_name()`.
 
 Available transformations are listed below:
 
-- `species_to_indices` converts species from strings to numbers.
-- `subtract_self_energies` subtracts self energies, you can pass.
-    a dict of self energies, or an `EnergyShifter` to let it infer
-    self energy from dataset and store the result to the given shifter.
+- `species_to_indices` accepts two different kinds of arguments. It converts
+    species from elements (e. g. "H", "C", "Cl", etc) into internal torchani
+    indices (as returned by :class:`torchani.utils.ChemicalSymbolsToInts` or
+    the ``species_to_tensor`` method of a :class:`torchani.models.BuiltinModel`
+    and :class:`torchani.neurochem.Constants`), if its argument is an iterable
+    of species. By default species_to_indices behaves this way, with an
+    argument of ``('H', 'C', 'N', 'O', 'F', 'S', 'Cl')``  However, if its
+    argument is the string "periodic_table", then elements are converted into
+    atomic numbers ("periodic table indices") instead. This last option is
+    meant to be used when training networks that already perform a forward pass
+    of :class:`torchani.nn.SpeciesConverter` on their inputs in order to
+    convert elements to internal indices, before processing the coordinates.
+
+- `subtract_self_energies` subtracts self energies from all molecules of the
+    dataset. It accepts two different kinds of arguments: You can pass a dict
+    of self energies, in which case self energies are directly subtracted
+    according to the key-value pairs, or a
+    :class:`torchani.utils.EnergyShifter`, in which case the self energies are
+    calculated by linear regression and stored inside the class in the order
+    specified by species_order. By default the function orders by atomic
+    number if no extra argument is provided, but a specific order may be requested.
+
 - `remove_outliers`
 - `shuffle`
 - `cache` cache the result of previous transformations.
 - `collate` pad the dataset, convert it to tensor, and stack them
-    together to get a batch.
+    together to get a batch. `collate` uses a default padding dictionary
+    ``{'species': -1, 'coordinates': 0.0, 'forces': 0.0, 'energies': 0.0}`` for
+    padding, but a custom padding dictionary can be passed as an optional
+    parameter, which overrides this default padding.
+
 - `pin_memory` copy the tensor to pinned memory so that later transfer
     to cuda could be faster.
 
-You can also use `split` to split the iterable to pieces. Use `split` as:
+Note that orderings used in :class:`torchani.utils.ChemicalSymbolsToInts` and
+:class:`torchani.nn.SpeciesConverter` should be consistent with orderings used
+in `species_to_indices` and `subtract_self_energies`. To prevent confusion it
+is recommended that arguments to intialize converters and arguments to these
+functions all order elements *by their atomic number* (e. g. if you are working
+with hydrogen, nitrogen and bromine always use ['H', 'N', 'Br'] and never ['N',
+'H', 'Br'] or other variations).  It is possible to specify a different custom
+ordering, mainly due to backwards compatibility and to fully custom atom types,
+but doing so is NOT recommended, since it is very error prone.
+
+you can also use `split` to split the iterable to pieces. use `split` as:
 
 .. code-block:: python
 
@@ -66,8 +98,8 @@ if PKBAR_INSTALLED:
 
 verbose = True
 
+PROPERTIES = ('energies',)
 
-PROPERTIES = ('energies', 'forces')
 PADDING = {
     'species': -1,
     'coordinates': 0.0,
@@ -76,8 +108,11 @@ PADDING = {
 }
 
 
-def collate_fn(samples):
-    return utils.stack_with_padding(samples, PADDING)
+def collate_fn(samples, padding=None):
+    if padding is None:
+        padding = PADDING
+
+    return utils.stack_with_padding(samples, padding)
 
 
 class IterableAdapter:
@@ -104,14 +139,14 @@ class Transformations:
     """Convert one reenterable iterable to another reenterable iterable"""
 
     @staticmethod
-    def species_to_indices(reenterable_iterable, species_order=('H', 'C', 'N', 'O', 'F', 'Cl', 'S')):
+    def species_to_indices(reenterable_iterable, species_order=('H', 'C', 'N', 'O', 'F', 'S', 'Cl')):
         if species_order == 'periodic_table':
             species_order = utils.PERIODIC_TABLE
         idx = {k: i for i, k in enumerate(species_order)}
 
         def reenterable_iterable_factory():
             for d in reenterable_iterable:
-                d['species'] = numpy.array([idx[s] for s in d['species']])
+                d['species'] = numpy.array([idx[s] for s in d['species']], dtype='i8')
                 yield d
         try:
             return IterableAdapterWithLength(reenterable_iterable_factory, len(reenterable_iterable))
@@ -119,7 +154,7 @@ class Transformations:
             return IterableAdapter(reenterable_iterable_factory)
 
     @staticmethod
-    def subtract_self_energies(reenterable_iterable, self_energies=None):
+    def subtract_self_energies(reenterable_iterable, self_energies=None, species_order=None):
         intercept = 0.0
         shape_inference = False
         if isinstance(self_energies, utils.EnergyShifter):
@@ -141,7 +176,13 @@ class Transformations:
                     if len(counts[s]) != n + 1:
                         counts[s].append(0)
                 Y.append(d['energies'])
-            species = sorted(list(counts.keys()))
+
+            # sort based on the order in periodic table by default
+            if species_order is None:
+                species_order = utils.PERIODIC_TABLE
+
+            species = sorted(list(counts.keys()), key=lambda x: species_order.index(x))
+
             X = [counts[s] for s in species]
             if shifter.fit_intercept:
                 X.append([1] * n)
@@ -207,8 +248,8 @@ class Transformations:
         return ret
 
     @staticmethod
-    def collate(reenterable_iterable, batch_size):
-        def reenterable_iterable_factory():
+    def collate(reenterable_iterable, batch_size, padding=None):
+        def reenterable_iterable_factory(padding=None):
             batch = []
             i = 0
             for d in reenterable_iterable:
@@ -216,10 +257,13 @@ class Transformations:
                 i += 1
                 if i == batch_size:
                     i = 0
-                    yield collate_fn(batch)
+                    yield collate_fn(batch, padding)
                     batch = []
             if len(batch) > 0:
-                yield collate_fn(batch)
+                yield collate_fn(batch, padding)
+
+        reenterable_iterable_factory = functools.partial(reenterable_iterable_factory,
+                                                         padding)
         try:
             length = (len(reenterable_iterable) + batch_size - 1) // batch_size
             return IterableAdapterWithLength(reenterable_iterable_factory, length)

@@ -49,12 +49,14 @@ class ANIModel(torch.nn.ModuleDict):
         return od
 
     def __init__(self, modules):
-        super(ANIModel, self).__init__(self.ensureOrderedDict(modules))
+        super().__init__(self.ensureOrderedDict(modules))
 
     def forward(self, species_aev: Tuple[Tensor, Tensor],
                 cell: Optional[Tensor] = None,
                 pbc: Optional[Tensor] = None) -> SpeciesEnergies:
         species, aev = species_aev
+        assert species.shape == aev.shape[:-1]
+
         species_ = species.flatten()
         aev = aev.flatten(0, 1)
 
@@ -91,7 +93,7 @@ class Sequential(torch.nn.ModuleList):
     """Modified Sequential module that accept Tuple type as input"""
 
     def __init__(self, *modules):
-        super(Sequential, self).__init__(modules)
+        super().__init__(modules)
 
     def forward(self, input_: Tuple[Tensor, Tensor],
                 cell: Optional[Tensor] = None,
@@ -108,7 +110,17 @@ class Gaussian(torch.nn.Module):
 
 
 class SpeciesConverter(torch.nn.Module):
-    """Convert from element index in the periodic table to 0, 1, 2, 3, ..."""
+    """Converts tensors with species labeled as atomic numbers into tensors
+    labeled with internal torchani indices according to a custom ordering
+    scheme. It takes a custom species ordering as initialization parameter. If
+    the class is initialized with ['H', 'C', 'N', 'O'] for example, it will
+    convert a tensor [1, 1, 6, 7, 1, 8] into a tensor [0, 0, 1, 2, 0, 3]
+
+    Arguments:
+        species (:class:`collections.abc.Sequence` of :class:`str`):
+        sequence of all supported species, in order (it is recommended to order
+        according to atomic number).
+    """
 
     def __init__(self, species):
         super().__init__()
@@ -123,4 +135,10 @@ class SpeciesConverter(torch.nn.Module):
                 pbc: Optional[Tensor] = None):
         """Convert species from periodic table element index to 0, 1, 2, 3, ... indexing"""
         species, coordinates = input_
-        return SpeciesCoordinates(self.conv_tensor[species], coordinates)
+        converted_species = self.conv_tensor[species]
+
+        # check if unknown species are included
+        if converted_species[species.ne(-1)].lt(0).any():
+            raise ValueError(f'Unknown species found in {species}')
+
+        return SpeciesCoordinates(converted_species.to(species.device), coordinates)
